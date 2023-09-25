@@ -1,0 +1,4 @@
+*.sw*
+*.o
+stek_server
+stek_client
