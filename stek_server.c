@@ -112,6 +112,7 @@ void handle_args(int argc, char* const argv[])
             port = strtoul(optarg, NULL, 0);
             break;
         case 'v':
+            printf("We're gonna be verbose!\n");
             stek_common_set_verbose(true);
             break;
         case 'h':
@@ -222,7 +223,7 @@ int stek_server_handle_io_event(struct stek_server_session *sess, bool write_rea
         }
         break;
     case STEK_SERVER_SESSION_STATE_RUNNING:
-        /* Re-run last command */
+
         break;
     case STEK_SERVER_SESSION_STATE_CLOSING:
         /* Re-run the terminate command */
@@ -441,6 +442,7 @@ int main(int argc, const char *argv[])
     EVP_PKEY *server_key = NULL;
     X509 *server_crt = NULL;
     int l_fd = -1;
+    struct stek_common_keys *stek = NULL;
 
     printf("stek_test server... starting up!\n");
 
@@ -452,8 +454,9 @@ int main(int argc, const char *argv[])
 
     handle_args(argc, (char * const *)argv);
 
-    if (STEK_IS_ERROR(stek_common_create_ssl_server_ctx(&ctx, NULL))) {
-        fprintf(stderr, "Failed to create SSL server context, aborting.\n");
+    /* Load Session Ticket encryption keyfile */
+    if (STEK_IS_ERROR(stek_common_load_encryption_keys(&stek, stek_file))) {
+        fprintf(stderr, "Failed to load STEKs from disk, aborting.\n");
         goto done;
     }
 
@@ -471,6 +474,13 @@ int main(int argc, const char *argv[])
         goto done;
     }
 
+    /* Create the TLS server context */
+    if (STEK_IS_ERROR(stek_common_create_ssl_server_ctx(&ctx, stek))) {
+        fprintf(stderr, "Failed to create SSL server context, aborting.\n");
+        goto done;
+    }
+
+    /* Attach the private key and certs */
     if (!SSL_CTX_use_PrivateKey(ctx, server_key)) {
         fprintf(stderr, "Failed to attach private key to SSL_CTX, aborting.\n");
         ERR_print_errors_fp(stderr);
@@ -483,8 +493,7 @@ int main(int argc, const char *argv[])
         goto done;
     }
 
-    /* TODO: Load Session Ticket encryption keyfile */
-
+    /* Bind to the appropriate port */
     addr.sin_port = htons(port);
     /* FIXME: force this to be specified on command line */
     addr.sin_addr.s_addr = htonl(INADDR_ANY);

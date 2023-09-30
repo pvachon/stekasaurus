@@ -4,13 +4,13 @@ OBJ = stek_server.o \
 DEFINES = -D_GNU_SOURCE
 CFLAGS = -O0 -ggdb
 INCLUDES = -I.
-LINK = -lssl -lcrypto
+LINK = -lssl -lcrypto -lcbor
 
 .c.o:
-	$(CC) $(INCLUDES) $(DEFINES) -c $<
+	$(CC) $(INCLUDES) $(DEFINES) $(CFLAGS) -c $<
 
 stek_server: $(OBJ)
-	$(CC) stek_common.o stek_server.o $(LINK) -o stek_server
+	$(CC) stek_common.o stek_server.o -ggdb $(LINK) -o stek_server
 
 stek_client: $(OBJ)
 	$(CC) stek_client.o $(LINK) -o stek_client
