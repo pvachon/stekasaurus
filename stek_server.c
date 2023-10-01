@@ -18,6 +18,10 @@
 
 #define STEK_SERVER_MAX_MSG_LENGTH      128
 
+#define MESSAGE(_msg, ...) do { \
+        fprintf(stderr, _msg " (" __FILE__ ":%d @ %s)\n", ##__VA_ARGS__, __LINE__, __FUNCTION__); \
+    } while (0)
+
 enum stek_server_session_state {
     STEK_SERVER_SESSION_STATE_STARTING = 0,
     STEK_SERVER_SESSION_STATE_RUNNING,
@@ -34,6 +38,8 @@ struct stek_server_session {
     uint8_t rx_msg[STEK_SERVER_MAX_MSG_LENGTH];
     size_t rx_msg_bytes;
     struct list_entry s_node;
+
+    struct sockaddr_in remote;
 };
 
 static
@@ -64,12 +70,12 @@ static
 void _handle_sigint(int signum)
 {
     if (true == terminating) {
-        fprintf(stderr, "User insisted we terminate ASAP, aborting.\n");
+        MESSAGE("User insisted we terminate ASAP, aborting.");
         exit(EXIT_FAILURE);
     }
 
     terminating = true;
-    fprintf(stderr, "User asked that we terminate, trying to do so cleanly.\n");
+    MESSAGE("User asked that we terminate, trying to do so cleanly.");
 }
 
 static
@@ -94,51 +100,51 @@ void handle_args(int argc, char* const argv[])
         switch (ch) {
         case 's':
             server_cert_file = strdup(optarg);
-            printf("Server certificate chain file: [%s]\n", server_cert_file);
+            MESSAGE("Server certificate chain file: [%s]", server_cert_file);
             break;
         case 'c':
             client_cert_file = strdup(optarg);
-            printf("Client certificate roots file: [%s]\n", client_cert_file);
+            MESSAGE("Client certificate roots file: [%s]", client_cert_file);
             break;
         case 'S':
             stek_file = strdup(optarg);
-            printf("Session Ticket Encryption Key file: [%s]\n", stek_file);
+            MESSAGE("Session Ticket Encryption Key file: [%s]", stek_file);
             break;
         case 'P':
             private_key_file = strdup(optarg);
-            printf("Private key file: [%s]\n", private_key_file);
+            MESSAGE("Private key file: [%s]", private_key_file);
             break;
         case 'p':
             port = strtoul(optarg, NULL, 0);
             break;
         case 'v':
-            printf("We're gonna be verbose!\n");
+            MESSAGE("We're gonna be verbose!");
             stek_common_set_verbose(true);
             break;
         case 'h':
             show_help(argv[0]);
             break;
         default:
-            printf("Unknown argument: %s\n", argv[opterr]);
+            MESSAGE("Unknown argument: %s", argv[opterr]);
             show_help(argv[0]);
         }
     }
 
     if (NULL == private_key_file) {
-        printf("You must specify a private key file (-P)\n");
+        MESSAGE("You must specify a private key file (-P)");
         show_help(argv[0]);
     }
 
     if (NULL == server_cert_file) {
-        printf("You must specify a server certificate chain (-s)\n");
+        MESSAGE("You must specify a server certificate chain (-s)");
         show_help(argv[0]);
     }
 
-    printf("Provisioned to listen  on TCP port %u\n", (unsigned)port);
+    MESSAGE("Provisioned to listen  on TCP port %u", (unsigned)port);
 }
 
 static
-int stek_server_new_session(struct stek_server_session **p_sess, int sess_fd, SSL_CTX *ctx)
+int stek_server_new_session(struct stek_server_session **p_sess, int sess_fd, SSL_CTX *ctx, struct sockaddr_in *remote)
 {
     int ret = EXIT_FAILURE;
 
@@ -146,13 +152,13 @@ int stek_server_new_session(struct stek_server_session **p_sess, int sess_fd, SS
     BIO *s_bio = NULL;
 
     if (NULL == (sess = calloc(1, sizeof(struct stek_server_session)))) {
-        printf("Out of memory during calloc(3), unable to allocate state for new session.\n");
+        MESSAGE("Out of memory during calloc(3), unable to allocate state for new session.");
         /* TODO: think about error handling */
         exit(ret);
     }
 
     if (NULL == (s_bio = BIO_new_socket(sess_fd, BIO_NOCLOSE))) {
-        printf("Failed to create socket BIO. Aborting.\n");
+        MESSAGE("Failed to create socket BIO. Aborting.");
         /* TODO: think about error handling */
         exit(ret);
     }
@@ -164,6 +170,7 @@ int stek_server_new_session(struct stek_server_session **p_sess, int sess_fd, SS
     sess->st = STEK_SERVER_SESSION_STATE_STARTING;
     sess->sess_fd = sess_fd;
     list_append(&active_sessions, &sess->s_node);
+    sess->remote = *remote;
 
     *p_sess = sess;
 
@@ -183,82 +190,6 @@ done:
     return ret;
 }
 
-/**
- * Consume any pending I/O event. This is also where we get a hint as to whether or not a session
- * should be considered closed and purged from our session list.
- */
-static
-int stek_server_handle_io_event(struct stek_server_session *sess, bool write_ready)
-{
-    int ret = EXIT_FAILURE;
-
-    int ssl_ret = 0;
-
-    switch (sess->st) {
-    case STEK_SERVER_SESSION_STATE_STARTING: {
-            int ssl_err = 0;
-            /* Run SSL_accept */
-            ssl_ret = SSL_accept(sess->conn);
-            if (SSL_ERROR_NONE != (ssl_err = SSL_get_error(sess->conn, ssl_ret))) {
-                switch (ssl_err) {
-                case SSL_ERROR_WANT_READ:
-                case SSL_ERROR_WANT_WRITE:
-                    /* Do nothing. We'll need to call SSL_accept yet again. */
-                    printf("Still waiting on data for SSL_accept!\n");
-                    ERR_print_errors_fp(stderr);
-                    break;
-                case SSL_ERROR_SYSCALL:
-                case SSL_ERROR_SSL:
-                    printf("Fatal internal error, abort.\n");
-                    ERR_print_errors_fp(stderr);
-                    /* Fatal error. Mark the session to terminate. */
-                    break;
-                default:
-                    printf("Weird out of state error code from OpenSSL: %d\n", ssl_err);
-                }
-            } else {
-                /* We can move on with life */
-                sess->st = STEK_SERVER_SESSION_STATE_RUNNING;
-            }
-        }
-        break;
-    case STEK_SERVER_SESSION_STATE_RUNNING:
-
-        break;
-    case STEK_SERVER_SESSION_STATE_CLOSING:
-        /* Re-run the terminate command */
-        break;
-    case STEK_SERVER_SESSION_STATE_CLOSED:
-        /* Signal the caller should terminate */
-        break;
-    }
-
-    ret = EXIT_SUCCESS;
-done:
-    return ret;
-}
-
-static
-int stek_server_terminate_session(struct stek_server_session *sess)
-{
-    int ret = EXIT_FAILURE;
-
-    int ssl_ret = 0;
-
-    if (NULL == sess || NULL == sess->conn) {
-        goto done;
-    }
-
-    sess->st = STEK_SERVER_SESSION_STATE_CLOSING;
-    if (0 >= (ssl_ret = SSL_shutdown(sess->conn))) {
-        
-    }
-
-    ret = EXIT_SUCCESS;
-done:
-    return ret;
-}
-
 static
 int stek_server_delete_session(struct stek_server_session **p_sess)
 {
@@ -267,15 +198,17 @@ int stek_server_delete_session(struct stek_server_session **p_sess)
     struct stek_server_session *sess = NULL;
 
     if (NULL == p_sess) {
-        printf("Tried to destroy NULL session, aborting.\n");
+        MESSAGE("Tried to destroy NULL session, aborting.");
         goto done;
     }
 
     sess = *p_sess;
 
+    /* Remove the session from whatever list it is in */
+    list_del(&sess->s_node);
+
     if (STEK_SERVER_SESSION_STATE_CLOSED != sess->st) {
-        printf("Tried to kill a session in flight, aborting.\n");
-        goto done;
+        MESSAGE("WARNING: Peer killed the connection.");
     }
 
     /* Terminate the SSL session */
@@ -299,6 +232,123 @@ done:
 }
 
 static
+int stek_server_terminate_session(struct stek_server_session *sess, bool *p_reap)
+{
+    int ret = EXIT_FAILURE;
+
+    int ssl_ret = 0,
+        ssl_err = SSL_ERROR_NONE;
+
+    if (NULL == sess || NULL == sess->conn) {
+        goto done;
+    }
+
+    sess->st = STEK_SERVER_SESSION_STATE_CLOSING;
+    if (0 >= (ssl_ret = SSL_shutdown(sess->conn))) {
+        if (SSL_ERROR_NONE != (ssl_err = SSL_get_error(sess->conn, ssl_ret))) {
+            switch (ssl_err) {
+            case SSL_ERROR_WANT_READ:
+            case SSL_ERROR_WANT_WRITE:
+                /* Do nothing. We'll need to call SSL_shutdown yet again when data becomes available. */
+                MESSAGE("Still waiting on data for SSL_shutdown!");
+                break;
+            case SSL_ERROR_SYSCALL:
+            case SSL_ERROR_SSL:
+                MESSAGE("Fatal internal error, marking for quick reap.");
+            default:
+                ERR_print_errors_fp(stderr);
+                /* Fatal error. Mark the session to be reaped. */
+                *p_reap = true;
+                break;
+            }
+        }
+    }
+
+    ret = EXIT_SUCCESS;
+done:
+    return ret;
+}
+
+/**
+ * Consume any pending I/O event. This is also where we get a hint as to whether or not a session
+ * should be considered closed and purged from our session list. This is our baseline continuiation
+ * function for any deferred event due to an I/O wait.
+ */
+static
+int stek_server_handle_io_event(struct stek_server_session *sess, bool write_ready, bool *p_reap)
+{
+    int ret = EXIT_FAILURE;
+
+    int ssl_ret = 0;
+
+    *p_reap = false;
+
+    switch (sess->st) {
+    case STEK_SERVER_SESSION_STATE_STARTING: {
+            int ssl_err = 0;
+            /* Run SSL_accept */
+            ssl_ret = SSL_accept(sess->conn);
+            if (SSL_ERROR_NONE != (ssl_err = SSL_get_error(sess->conn, ssl_ret))) {
+                switch (ssl_err) {
+                case SSL_ERROR_WANT_READ:
+                case SSL_ERROR_WANT_WRITE:
+                    /* Do nothing. We'll need to call SSL_accept yet again. */
+                    MESSAGE("Still waiting on data for SSL_accept!");
+                    break;
+                case SSL_ERROR_SYSCALL:
+                case SSL_ERROR_SSL:
+                    MESSAGE("Fatal internal error, abort.");
+                default:
+                    ERR_print_errors_fp(stderr);
+                    /* Fatal error. Mark the session to terminate. */
+                    *p_reap = true;
+                }
+            } else {
+                /* We can move on with life */
+                sess->st = STEK_SERVER_SESSION_STATE_RUNNING;
+            }
+        }
+        break;
+    case STEK_SERVER_SESSION_STATE_RUNNING:
+
+        break;
+    case STEK_SERVER_SESSION_STATE_CLOSING:
+        /* Re-run the terminate command */
+        if (0 >= (ssl_ret = SSL_shutdown(sess->conn))) {
+            int ssl_err = SSL_ERROR_NONE;
+            if (SSL_ERROR_NONE != (ssl_err = SSL_get_error(sess->conn, ssl_ret))) {
+                switch (ssl_err) {
+                case SSL_ERROR_WANT_READ:
+                case SSL_ERROR_WANT_WRITE:
+                    /* Do nothing. We'll need to call SSL_shutdown yet again. */
+                    MESSAGE("Still waiting on data for SSL_shutdown!");
+                    break;
+                case SSL_ERROR_SYSCALL:
+                case SSL_ERROR_SSL:
+                    MESSAGE("Fatal internal error, marking for quick reap.");
+                default:
+                    ERR_print_errors_fp(stderr);
+                    /* Fatal error. Mark the session to be reaped. */
+                    *p_reap = true;
+                    break;
+                }
+            }
+        } else {
+            sess->st = STEK_SERVER_SESSION_STATE_CLOSED;
+        }
+        break;
+    case STEK_SERVER_SESSION_STATE_CLOSED:
+        /* Signal the caller should terminate */
+        MESSAGE("An I/O event on a closed session is a bit weird?");
+        break;
+    }
+
+    ret = EXIT_SUCCESS;
+done:
+    return ret;
+}
+
+static
 int stek_server_loop(SSL_CTX *ctx, int listen_fd)
 {
     int ret = EXIT_FAILURE;
@@ -308,9 +358,11 @@ int stek_server_loop(SSL_CTX *ctx, int listen_fd)
                        epevs[STEK_SERVER_MAX_EVENTS];
     int epfd = -1,
         nr_sessions = 0;
+    LIST_HEAD(sess_terminate_pending);
+    LIST_HEAD(sess_reap);
 
     if (0 > (epfd = epoll_create1(0))) {
-        fprintf(stderr, "Failed to create epoll file descriptor, aborting. %s (%d)\n",
+        MESSAGE("Failed to create epoll file descriptor, aborting. %s (%d)",
                 strerror(errno), errno);
         goto done;
     }
@@ -319,18 +371,18 @@ int stek_server_loop(SSL_CTX *ctx, int listen_fd)
     epev.events = EPOLLIN;
     epev.data.fd = listen_fd;
     if (0 > epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &epev)) {
-        fprintf(stderr, "Failed to add listener fd to epoll, aborting. %s (%d)\n",
+        MESSAGE("Failed to add listener fd to epoll, aborting. %s (%d)",
                 strerror(errno), errno);
         goto done;
     }
 
-    fprintf(stderr, "The server is on the air!\n");
+    MESSAGE("The server is on the air!");
 
     while (true == running || 0 != nr_sessions) {
         int nr_fd = 0;
         if (0 > (nr_fd = epoll_wait(epfd, epevs, STEK_SERVER_MAX_EVENTS, -1))) {
             if (EINTR != errno) {
-                fprintf(stderr, "Failed to get epoll(7) events, aborting. %s (%d)\n",
+                MESSAGE("Failed to get epoll(7) events, aborting. %s (%d)",
                         strerror(errno), errno);
                 running = false;
                 goto done;
@@ -350,20 +402,20 @@ int stek_server_loop(SSL_CTX *ctx, int listen_fd)
                 if (0 > (new_conn = accept4(listen_fd, (struct sockaddr *)&addr, &addr_len,
                                 SOCK_NONBLOCK)))
                 {
-                    fprintf(stderr, "Error while accept(2)'ing on listening socket. %s (%d)\n",
+                    MESSAGE("Error while accept(2)'ing on listening socket. %s (%d)",
                             strerror(errno), errno);
                     /* Fail. This might be too brutal for a production use case. */
                     running = false;
                     goto done;
                 }
 
-                fprintf(stderr, "New incoming connection from %s:%u\n",
+                MESSAGE("New incoming connection from %s:%u",
                         inet_ntoa(addr.sin_addr), (unsigned)htons(addr.sin_port));
 
                 /* Initialize a new SSL session */
-                if (stek_server_new_session(&sess, new_conn, ctx)) {
+                if (stek_server_new_session(&sess, new_conn, ctx, &addr)) {
                     /* TODO: Fixme, fail gracefully if this is non-fatal for other sessions */
-                    fprintf(stderr, "Failure while setting up new TLS session, aborting.\n");
+                    MESSAGE("Failure while setting up new TLS session, aborting.");
                     running = false;
                     goto done;
                 }
@@ -372,56 +424,104 @@ int stek_server_loop(SSL_CTX *ctx, int listen_fd)
                 epev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
                 epev.data.ptr = sess;
                 if (0 > epoll_ctl(epfd, EPOLL_CTL_ADD, new_conn, &epev)) {
-                    fprintf(stderr, "Error while adding socket to listening group. %s (%d)\n",
+                    MESSAGE("Error while adding socket to listening group. %s (%d)",
                             strerror(errno), errno);
                     running = false;
                     goto done;
                 }
+
+                nr_sessions++;
             } else {
                 struct stek_server_session *ev_sess = (struct stek_server_session *)evt->data.ptr;
+                bool reap = false;
 
-                if (evt->events & EPOLLRDHUP) {
+                if (evt->events & EPOLLRDHUP || evt->events & EPOLLERR) {
                     /* Remove from epoll waiters */
                     if (0 > epoll_ctl(epfd, EPOLL_CTL_DEL, ev_sess->sess_fd, NULL)) {
-                        fprintf(stderr, "Error while removing file descriptor: %s (%d)\n",
+                        MESSAGE("Error while removing file descriptor: %s (%d)",
                                 strerror(errno), errno);
                         running = false;
                         goto done;
                     }
 
-                    stek_server_delete_session(&ev_sess);
+                    /* Prepare to move the session to an action list */
+                    list_del(&ev_sess->s_node);
+
+                    stek_server_terminate_session(ev_sess, &reap);
+                    if (true == reap) {
+                        list_append(&sess_reap, &ev_sess->s_node);
+                    } else {
+                        list_append(&sess_terminate_pending, &ev_sess->s_node);
+                    }
 
                     /* Don't process any other events */
                     continue;
                 }
 
-                if (evt->events & EPOLLERR) {
-
-                }
-
                 if (evt->events & EPOLLIN || evt->events & EPOLLOUT) {
-                    if (stek_server_handle_io_event(ev_sess, !!(evt->events & EPOLLIN))) {
-                        fprintf(stderr, "Error while handling I/O event, terminating.\n");
+                    if (stek_server_handle_io_event(ev_sess, !!(evt->events & EPOLLIN), &reap)) {
+                        MESSAGE("Error while handling I/O event, terminating.");
                     }
                 }
             }
 
-            if (true == terminating) {
-                struct stek_server_session *sess = NULL;
 
-                fprintf(stderr, "We were asked to terminate.\n");
-                running = false;
+        }
 
-                /* Go through each session and push to terminate */
-                list_for_each_type(sess, &active_sessions, s_node) {
-                    /* Signal each session should terminate */
-                    stek_server_terminate_session(sess);
+        /* We've been asked to terminate, so clean things up. By the time we get through all
+         * this, the sessions that are active are all in either the reap or terminate pending
+         * list, and the acceptor socket will be removed from the epoll group. We will just
+         * need to wait for all the sessions to terminate gracefully, now.
+         */
+        if (true == terminating && true == running) {
+            struct stek_server_session *sess = NULL;
+
+            MESSAGE("We were asked to terminate, start cleanup.");
+            running = false;
+
+            /* Go through each session and push to terminate */
+            list_for_each_type(sess, &active_sessions, s_node) {
+                bool reap = false;
+                /* Signal each session should terminate */
+                stek_server_terminate_session(sess, &reap);
+
+                if (true == reap) {
+                    list_append(&sess_reap, &sess->s_node);
+                } else {
+                    list_append(&sess_terminate_pending, &sess->s_node);
                 }
             }
+
+            /* Remove the acceptor socket from epoll */
+            MESSAGE("Removing the session acceptor from epoll list.");
+            if (0 > epoll_ctl(epfd, EPOLL_CTL_DEL, listen_fd, NULL)) {
+                MESSAGE("Failed to remove acceptor fd from epoll group, aborting. %s (%d)",
+                        strerror(errno), errno);
+                goto done;
+            }
         }
+
+        /* Reap any sessions marked to be reaped */
+        struct stek_server_session *sess = NULL,
+                                   *temp = NULL;
+
+        list_for_each_type_safe(sess, temp, &sess_reap, s_node) {
+            /* TODO: better error handling */
+            MESSAGE("Found session in reap list for %s:%u", inet_ntoa(sess->remote.sin_addr),
+                    (unsigned)htons(sess->remote.sin_port));
+            stek_server_delete_session(&sess);
+
+            if (0 > epoll_ctl(epfd, EPOLL_CTL_DEL, listen_fd, NULL)) {
+                MESSAGE("Failed to remove acceptor fd from epoll group, aborting. %s (%d)",
+                        strerror(errno), errno);
+                goto done;
+            }
+            nr_sessions--;
+        }
+
     }
 
-    fprintf(stderr, "Starting graceful server shutdown.\n");
+    MESSAGE("Starting graceful server shutdown.");
 
     ret = EXIT_SUCCESS;
 done:
@@ -444,7 +544,7 @@ int main(int argc, const char *argv[])
     int l_fd = -1;
     struct stek_common_keys *stek = NULL;
 
-    printf("stek_test server... starting up!\n");
+    MESSAGE("stek_test server... starting up!");
 
     /* Ignore SIGPIPE; we'll act on EPIPE instead */
     signal(SIGPIPE, SIG_IGN);
@@ -456,39 +556,39 @@ int main(int argc, const char *argv[])
 
     /* Load Session Ticket encryption keyfile */
     if (STEK_IS_ERROR(stek_common_load_encryption_keys(&stek, stek_file))) {
-        fprintf(stderr, "Failed to load STEKs from disk, aborting.\n");
+        MESSAGE("Failed to load STEKs from disk, aborting.");
         goto done;
     }
 
     /* Load up the cert chain */
     if (STEK_IS_ERROR(stek_common_load_pem_cert(&server_crt, server_cert_file))) {
-        fprintf(stderr, "Failed to load server certificate chain from %s, aborting.\n",
+        MESSAGE("Failed to load server certificate chain from %s, aborting.",
                 server_cert_file);
         goto done;
     }
 
     /* Load private key file */
     if (STEK_IS_ERROR(stek_common_load_pem_privkey(&server_key, private_key_file))) {
-        fprintf(stderr, "Failed to load private key from file %s, aborting.\n",
+        MESSAGE("Failed to load private key from file %s, aborting.",
                 private_key_file);
         goto done;
     }
 
     /* Create the TLS server context */
     if (STEK_IS_ERROR(stek_common_create_ssl_server_ctx(&ctx, stek))) {
-        fprintf(stderr, "Failed to create SSL server context, aborting.\n");
+        MESSAGE("Failed to create SSL server context, aborting.");
         goto done;
     }
 
     /* Attach the private key and certs */
     if (!SSL_CTX_use_PrivateKey(ctx, server_key)) {
-        fprintf(stderr, "Failed to attach private key to SSL_CTX, aborting.\n");
+        MESSAGE("Failed to attach private key to SSL_CTX, aborting.");
         ERR_print_errors_fp(stderr);
         goto done;
     }
 
     if (!SSL_CTX_use_certificate(ctx, server_crt)) {
-        fprintf(stderr, "Failed to attach certificate to SSL_CTX, aborting.\n");
+        MESSAGE("Failed to attach certificate to SSL_CTX, aborting.");
         ERR_print_errors_fp(stderr);
         goto done;
     }
@@ -499,18 +599,18 @@ int main(int argc, const char *argv[])
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (0 > (l_fd = socket(AF_INET, SOCK_STREAM, 0))) {
-        fprintf(stderr, "Failed to create socket: %s (%d)\n", strerror(errno), errno);
+        MESSAGE("Failed to create socket: %s (%d)", strerror(errno), errno);
         goto done;
     }
 
     if (0 > (bind(l_fd, (struct sockaddr *)&addr, sizeof(addr)))) {
-        fprintf(stderr, "Failed to bind to port %u! %s (%d)\n", (unsigned)port,
+        MESSAGE("Failed to bind to port %u! %s (%d)", (unsigned)port,
                 strerror(errno), errno);
         goto done;
     }
 
     if (0 > listen(l_fd, 10)) {
-        fprintf(stderr, "Failed to listen to bound socket. Reason: %s (%d)\n",
+        MESSAGE("Failed to listen to bound socket. Reason: %s (%d)",
                 strerror(errno), errno);
         goto done;
     }
