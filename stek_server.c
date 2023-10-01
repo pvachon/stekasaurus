@@ -436,15 +436,10 @@ int stek_server_loop(SSL_CTX *ctx, int listen_fd)
                 bool reap = false;
 
                 if (evt->events & EPOLLRDHUP || evt->events & EPOLLERR) {
-                    /* Remove from epoll waiters */
-                    if (0 > epoll_ctl(epfd, EPOLL_CTL_DEL, ev_sess->sess_fd, NULL)) {
-                        MESSAGE("Error while removing file descriptor: %s (%d)",
-                                strerror(errno), errno);
-                        running = false;
-                        goto done;
-                    }
-
                     /* Prepare to move the session to an action list */
+                    MESSAGE("Error with connection from %s:%u", inet_ntoa(ev_sess->remote.sin_addr),
+                            (unsigned)htons(ev_sess->remote.sin_port));
+
                     list_del(&ev_sess->s_node);
 
                     stek_server_terminate_session(ev_sess, &reap);
@@ -506,16 +501,16 @@ int stek_server_loop(SSL_CTX *ctx, int listen_fd)
                                    *temp = NULL;
 
         list_for_each_type_safe(sess, temp, &sess_reap, s_node) {
+            if (0 > epoll_ctl(epfd, EPOLL_CTL_DEL, sess->sess_fd, NULL)) {
+                MESSAGE("Failed to remove terminated session fd from epoll group. %s (%d)",
+                        strerror(errno), errno);
+            }
+
             /* TODO: better error handling */
             MESSAGE("Found session in reap list for %s:%u", inet_ntoa(sess->remote.sin_addr),
                     (unsigned)htons(sess->remote.sin_port));
             stek_server_delete_session(&sess);
 
-            if (0 > epoll_ctl(epfd, EPOLL_CTL_DEL, listen_fd, NULL)) {
-                MESSAGE("Failed to remove acceptor fd from epoll group, aborting. %s (%d)",
-                        strerror(errno), errno);
-                goto done;
-            }
             nr_sessions--;
         }
 
