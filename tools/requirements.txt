@@ -1,0 +1,2 @@
+cbor2==5.4.6
+cryptography==41.0.4
