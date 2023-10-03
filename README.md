@@ -14,10 +14,13 @@ mechanism as that which issues identity certificates.
 ## STEK file format
 
 A STEK file (usually `foo.stek`) is a CBOR-formatted file that contains the following keys in a
-top-level object:
- * `validFrom` - a 64-bit, seconds since the epoch timestamp for when the STEK becomes valid
- * `validTo` - a 64-bit, seconds since the epoch timestamp after which this STEK should not be used
- * `stekBytes` - A 32 byte, AES-256 key used to encrypt all session tickets
+top-level map:
+ * `version` - an integer. Always set to 1, currently
+ * `validFrom` - a 32-bit, seconds since the epoch timestamp for when the STEK becomes valid
+ * `validTo` - a 32-bit, seconds since the epoch timestamp after which this STEK should not be used
+ * `wrapKey` - a 32 byte, AES-256 key used to encrypt all session tickets
+ * `hmacKey` - a 32 byte HMAC-SHA-256 key, used to authenticate all session tickets
+ * `serviceName` - a free-form string with the service identifier (can be used to avoid mixing up key users)
 
 These values are used to internally manage the lifecycle of STEKs, and contain the STEK itself.
 Of course, the STEK file should be treated with the same level of secrecy as the private key itself.
